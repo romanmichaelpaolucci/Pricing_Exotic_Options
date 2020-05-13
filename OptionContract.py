@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from datetime import date
 from scipy.stats import norm
 
-# Tools
+
 class OptionTools:
 
     def __init__(self):
@@ -35,17 +35,20 @@ class OptionTools:
         return options
 
     # Simulate options, returns a set of OptionSimulations
-    def simulate_calls(self, n_time_steps, n_options, strike_price, initial_asset_price, drift, delta_t, asset_volatility, risk_free_rate, time_to_expiration):
+    def simulate_calls(self, n_options, strike_price, initial_asset_price, drift, delta_t, asset_volatility, risk_free_rate, time_to_expiration):
         # List of stochastic processes modeling the underlying asset
         stochastic_processes = []
         # Generate a stochastic process for each option
         for i in range(n_options):
             stochastic_processes.append(StochasticProcess(initial_asset_price, drift, delta_t, asset_volatility)) # Note delta t is annualized
 
+        # Automatically create the required steps in time for the simulation by creating a time_step in the stochastic process if its still greator than 0
         # Make n_time_steps for each stochastic process
         for stochastic_process in stochastic_processes:
-            # Make n_time_steps for each process
-            for i in range(n_time_steps):
+            tte = time_to_expiration
+            while((tte-stochastic_process.delta_t) > 0):
+                # Account for the passing of time
+                tte = tte - stochastic_process.delta_t
                 # Take a time step in the stochastic process
                 stochastic_process.time_step()
 
@@ -69,6 +72,8 @@ class OptionTools:
                     # Append all variables for the i asset price in this z stochastic process
                     option_simulations[z].option_prices.append(e.price)
                     option_simulations[z].option_deltas.append(e.delta)
+                    option_simulations[z].option_gammas.append(e.gamma)
+                    option_simulations[z].option_vegas.append(e.vega)
                     option_simulations[z].asset_prices.append(stochastic_processes[z].asset_prices[i])
                 # Decrement the time_to_expiration by the step in time within the stochastic process, even though z iterates through each stochasstic process the step in time is constant acorss all of them
                 if (time_to_expiration_var - stochastic_processes[z].delta_t) > 0:
@@ -109,10 +114,24 @@ class OptionTools:
             exercised = exercised + option_simulation.exercise_on_expiration(call)
         return exercised/len(option_simulations)
 
+    # Retrns the max, min, and avg exercise value
+    def exercise_value_analysis(self, option_simulations):
+        max = 0
+        avg = 0
+        min = 0
+        for o in option_simulations:
+            if o.exercise_value() >= max:
+                max = o.exercise_value()
+            if o.exercise_value() <= min:
+                min = o.exercise_value()
+            avg += o.exercise_value()
+        avg = avg/len(option_simulations)
+        return max, avg, min
+
     # Takes an option simulation set, chart each sample path and the respective variable
-    def aggregate_chart_option_simulation(self, option_simulations, asset_prices, option_prices, option_deltas):
+    def aggregate_chart_option_simulation(self, option_simulations, asset_prices, option_prices, option_deltas, option_gammas, option_vegas):
         # Sum the amount of variables we are plotting
-        subplots = asset_prices + option_prices + option_deltas
+        subplots = asset_prices + option_prices + option_deltas + option_gammas + option_vegas
         # Create subplots for each variable we are plotting
         fig, axs = plt.subplots(subplots)
         fig.suptitle('Option Simulation Outcome')
@@ -133,9 +152,26 @@ class OptionTools:
             axs[2].set_title('Option Deltas Consequence of Asset Price Change')
             for o in option_simulations:
                 axs[2].plot(o.option_deltas)
+        if option_gammas:
+            axs[3].set_title('Option Gammas Consequence of Asset Price Change')
+            for o in option_simulations:
+                axs[3].plot(o.option_gammas)
+        if option_deltas:
+            axs[4].set_title('Option Deltas Consequence of Asset Price Change')
+            for o in option_simulations:
+                axs[4].plot(o.option_vegas)
 
         fig.subplots_adjust(hspace=.5)
         plt.show()
+
+
+    # Optimal Re-hedging
+    # Returns hedging error from t=1 to expiration
+    def simulation_rehedging_analysis(self, option_simulations):
+        hedging_errors = []
+        for o in option_simulations:
+            hedging_errors.append(o.option_deltas[0]*(o.asset_prices[len(o.asset_prices)-1]-o.asset_prices[0]))
+        return hedging_errors
 
 
 # Models the underling asset assuming geometetric brownian motion
@@ -149,9 +185,9 @@ class StochasticProcess:
             pass
 
     def time_step(self):
-        # Brownian motion is ~N(0,1)
-        dW = np.random.normal()
-        dS = self.drift*self.current_asset_price*self.delta_t + self.asset_volatility*self.current_asset_price*dW*math.sqrt(self.delta_t) # NOTE: Idk why but we need this root delta t term for accurate motion
+        # Brownian motion is ~N(0, delta_t), np.random.normal takes mean and standard deviation
+        dW = np.random.normal(0, math.sqrt(self.delta_t))
+        dS = self.drift*self.current_asset_price*self.delta_t + self.asset_volatility*self.current_asset_price*dW
         self.asset_prices.append(self.current_asset_price + dS)
         # Reassign the new current asset price for next time step
         self.current_asset_price = self.current_asset_price + dS
@@ -176,6 +212,28 @@ class EuropeanCall:
         x1 = x1/(asset_volatility*(time_to_expiration**.5))
         z1 = norm.cdf(x1)
         return z1
+
+    def call_gamma(
+        self, asset_price, asset_volatility, strike_price,
+        time_to_expiration, risk_free_rate
+            ):
+        b = math.exp(-risk_free_rate*time_to_expiration)
+        x1 = math.log(asset_price/(b*strike_price)) + .5*(asset_volatility*asset_volatility)*time_to_expiration
+        x1 = x1/(asset_volatility*(time_to_expiration**.5))
+        z1 = norm.cdf(x1)
+        z2 = z1/(asset_price*asset_volatility*math.sqrt(time_to_expiration))
+        return z2
+
+    def call_vega(
+        self, asset_price, asset_volatility, strike_price,
+        time_to_expiration, risk_free_rate
+            ):
+        b = math.exp(-risk_free_rate*time_to_expiration)
+        x1 = math.log(asset_price/(b*strike_price)) + .5*(asset_volatility*asset_volatility)*time_to_expiration
+        x1 = x1/(asset_volatility*(time_to_expiration**.5))
+        z1 = norm.cdf(x1)
+        z2 = asset_price*z1*math.sqrt(time_to_expiration)
+        return z2
 
     def call_price(
         self, asset_price, asset_volatility, strike_price,
@@ -203,6 +261,8 @@ class EuropeanCall:
         self.risk_free_rate = risk_free_rate
         self.price = self.call_price(asset_price, asset_volatility, strike_price, time_to_expiration, risk_free_rate)
         self.delta = self.call_delta(asset_price, asset_volatility, strike_price, time_to_expiration, risk_free_rate)
+        self.gamma = self.call_gamma(asset_price, asset_volatility, strike_price, time_to_expiration, risk_free_rate)
+        self.vega = self.call_vega(asset_price, asset_volatility, strike_price, time_to_expiration, risk_free_rate)
 
 
 class EuropeanPut:
@@ -216,6 +276,28 @@ class EuropeanPut:
         x1 = x1/(asset_volatility*(time_to_expiration**.5))
         z1 = norm.cdf(x1)
         return z1 - 1
+
+    def put_gamma(
+        self, asset_price, asset_volatility, strike_price,
+        time_to_expiration, risk_free_rate
+            ):
+        b = math.exp(-risk_free_rate*time_to_expiration)
+        x1 = math.log(asset_price/(b*strike_price)) + .5*(asset_volatility*asset_volatility)*time_to_expiration
+        x1 = x1/(asset_volatility*(time_to_expiration**.5))
+        z1 = norm.cdf(x1)
+        z2 = z1/(asset_price*asset_volatility*math.sqrt(time_to_expiration))
+        return z2
+
+    def put_vega(
+        self, asset_price, asset_volatility, strike_price,
+        time_to_expiration, risk_free_rate
+            ):
+        b = math.exp(-risk_free_rate*time_to_expiration)
+        x1 = math.log(asset_price/(b*strike_price)) + .5*(asset_volatility*asset_volatility)*time_to_expiration
+        x1 = x1/(asset_volatility*(time_to_expiration**.5))
+        z1 = norm.cdf(x1)
+        z2 = asset_price*z1*math.sqrt(time_to_expiration)
+        return z2
 
     def put_price(
         self, asset_price, asset_volatility, strike_price,
@@ -243,6 +325,8 @@ class EuropeanPut:
         self.risk_free_rate = risk_free_rate
         self.price = self.put_price(asset_price, asset_volatility, strike_price, time_to_expiration, risk_free_rate)
         self.delta = self.put_delta(asset_price, asset_volatility, strike_price, time_to_expiration, risk_free_rate)
+        self.gamma = self.put_gamma(asset_price, asset_volatility, strike_price, time_to_expiration, risk_free_rate)
+        self.vega = self.put_vega(asset_price, asset_volatility, strike_price, time_to_expiration, risk_free_rate)
 
 
 class OptionSimulation:
@@ -261,6 +345,17 @@ class OptionSimulation:
             else:
                 return False
 
+    def exercise_value(self, call=True):
+        # Call
+        if call:
+            profit = self.asset_prices[len(self.asset_prices)-1] - self.strike_price
+            return profit if profit >= 0 else 0
+
+        # Put
+        else:
+            profit =  self.strike_price - self.asset_prices[len(self.asset_prices)-1]
+            return profit if profit >= 0 else 0
+
     def __init__(
         self, initial_asset_price, asset_volatility, strike_price,
         time_to_expiration, risk_free_rate
@@ -273,21 +368,20 @@ class OptionSimulation:
         self.asset_prices = []
         self.option_prices = []
         self.option_deltas = []
-
-# Get time to expiration annum, a
-a, b = OptionTools().compute_time_to_expiration(2020, 6, 30)
-
-# Price the option for comparison
-e = EuropeanCall(284.2, .36, 350, a, .003)
-print(e.price)
+        self.option_gammas = []
+        self.option_vegas = []
 
 # Simulate the option
-result_set = OptionTools().simulate_calls(100, 500, 280, 278, .2, 1/365, .39, .08, (29/365))
+result_set = OptionTools().simulate_calls(10, 80, 50, .2, 1/365, .3, .08, 2)
 # If your option is ever worth more than the average of all the simulations sell it immediately...
 
-OptionTools().aggregate_chart_option_simulation(result_set, True, True, True)
+#OptionTools().aggregate_chart_option_simulation(result_set, True, True, True, True, True)
 
-s = OptionTools().simulation_analysis(result_set)
+#s = OptionTools().simulation_analysis(result_set)
 k = OptionTools().probability_of_exercise(result_set)
-print(s)
+#t = OptionTools().simulation_rehedging_analysis(result_set)
+#z = OptionTools().exercise_value_analysis(result_set)
+#print(s)
 print(k)
+#print(np.average(t))
+#print(z)
