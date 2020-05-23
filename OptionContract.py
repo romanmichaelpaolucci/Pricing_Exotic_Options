@@ -11,6 +11,10 @@ class OptionTools:
     def __init__(self):
         pass
 
+    # Compute the amount of shares required to be delta-neutral
+    def neutral_shares(self, option_position, delta):
+        return math.floor(option_position*delta)
+
     # Return annualized remaining time to maturity and days to maturity for simulations
     def compute_time_to_expiration(self, Y, M, D):
         d0 = date.today()
@@ -145,7 +149,7 @@ class OptionTools:
             # To show strike price label
             axs[0].legend()
         if option_prices:
-            axs[1].set_title('Option Prices Consequence of Asset Price Change')
+            axs[1].set_title('Black-Scholes Option Prices Consequence of Asset Price Change')
             for o in option_simulations:
                 axs[1].plot(o.option_prices)
         if option_deltas:
@@ -165,13 +169,66 @@ class OptionTools:
         plt.show()
 
 
-    # Optimal Re-hedging
-    # Returns hedging error from t=1 to expiration
-    def simulation_rehedging_analysis(self, option_simulations):
-        hedging_errors = []
-        for o in option_simulations:
-            hedging_errors.append(o.option_deltas[0]*(o.asset_prices[len(o.asset_prices)-1]-o.asset_prices[0]))
-        return hedging_errors
+    # Creating and holding a hedged portfolio
+    # Dynamic rehedging will only incurr p/l if the sample path does not realize the implied asset_volatility at the time of pricing
+    def simulate_hedge(self, option_simulations):
+        # How many contacts (right to 100 underlying)
+        options = 100
+        # Cumulative rehedging cost due to change in underlying asset EXCLUDING TRANSACTION COSTS
+        total_cost_to_rehedge = 0
+        # Previous period's quantity to calculate rehedge cost
+        previous_qty = 0
+        # Previous period's price to calculate rehedge cost
+        previous_price = 0
+        # array to keep track of average position fill price for P/L
+        historical_cost = []
+
+        # One initial hedge
+        for i in range(0, len(option_simulations[0].asset_prices)):
+
+            # Set t (current) values from sim
+            current_neutral_qty = self.neutral_shares(options, option_simulations[0].option_deltas[i])
+            current_asset_price = option_simulations[0].asset_prices[i]
+
+            # instantiate array with historical cost of a neutralized delta
+            if previous_price == 0:
+                for i in range(0, current_neutral_qty):
+                    historical_cost.append(current_asset_price)
+
+            # after instantiation
+            if previous_price != 0:
+                # Compute the change in quanty for a neutral delta
+                dq = (current_neutral_qty - previous_qty)
+
+                # we need to buy more
+                if dq > 0:
+                    for i in range(0, (dq)):
+                        # append the asset at its current price to our historical cost
+                        historical_cost.append(current_asset_price) # This only adds value to the portfolio so we exclude realizing a P/L from the equity
+                        # Note this should include a transaciton cost
+
+                # we get to sell some
+                else:
+                    # If we still have a position
+                    if(current_neutral_qty > 0):
+                        # Compute the average fill historical cost
+                        avg_position = np.average(historical_cost)
+                        # The realizaiton is the amount we are selling times the change in price from our average fill
+                        total_cost_to_rehedge += -(dq)*(current_asset_price - avg_position)
+                        # reset the historical costs
+                        historical_cost = []
+                        # Fill the historical cost such that the average remains the same (fill with the current quantity times the original average fill)
+                        for i in range(0, current_neutral_qty):
+                            historical_cost.append(avg_position)
+
+            # Set t-1
+            previous_price = current_asset_price
+            previous_qty = current_neutral_qty
+        print('Ending Equity Position: ', previous_qty)
+        print('Total Cost to Rehedge: $', total_cost_to_rehedge*options)
+        print('Initial Premium: ', options*option_simulations[0].option_prices[0]*100)
+        print('Option Exercise Value: ', option_simulations[0].exercise_value()*options*100)
+        print('Short Call Delta-Hedged P/L: ', options*option_simulations[0].option_prices[0]*100 + total_cost_to_rehedge*options - 100*option_simulations[0].exercise_value()*options + previous_qty*previous_price)
 
 
 # Models the underling asset assuming geometetric brownian motion
@@ -371,17 +428,23 @@ class OptionSimulation:
         self.option_gammas = []
         self.option_vegas = []
 
+# Should simulated and theoretical value converge?
+
 # Simulate the option
-result_set = OptionTools().simulate_calls(10, 80, 50, .2, 1/365, .3, .08, 2)
+#result_set = OptionTools().simulate_calls(100, 80, 50, .2, 1/365, .3, .08, 1)
 # If your option is ever worth more than the average of all the simulations sell it immediately...
 
+#OptionTools().aggregate_chart_option_simulation(result_set, True, True, False, False, False)
 #OptionTools().aggregate_chart_option_simulation(result_set, True, True, True, True, True)
 
+#r = OptionTools().simulate_hedge(result_set)
+print(EuropeanCall(296, .234, 295, 1/12, 0).price)
+
 #s = OptionTools().simulation_analysis(result_set)
-k = OptionTools().probability_of_exercise(result_set)
+#k = OptionTools().probability_of_exercise(result_set)
 #t = OptionTools().simulation_rehedging_analysis(result_set)
 #z = OptionTools().exercise_value_analysis(result_set)
 #print(s)
-print(k)
+#print(k)
 #print(np.average(t))
 #print(z)
